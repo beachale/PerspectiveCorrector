@@ -254,24 +254,34 @@ function applyHomography(H, x, y) {
   };
 }
 
-function sampleNearest(src, width, height, x, y, dst, di) {
-  if (!Number.isFinite(x) || !Number.isFinite(y)) {
-    dst[di] = 0; dst[di + 1] = 0; dst[di + 2] = 0; dst[di + 3] = 0;
-    return;
-  }
+function writeTransparentPixel(dst, di) {
+  dst[di] = 0;
+  dst[di + 1] = 0;
+  dst[di + 2] = 0;
+  dst[di + 3] = 0;
+}
 
-  const xi = Math.max(0, Math.min(width - 1, Math.round(x)));
-  const yi = Math.max(0, Math.min(height - 1, Math.round(y)));
-  const si = (yi * width + xi) * 4;
+function copySampledPixel(src, si, dst, di) {
   dst[di] = src[si];
   dst[di + 1] = src[si + 1];
   dst[di + 2] = src[si + 2];
   dst[di + 3] = src[si + 3];
 }
 
+function sampleNearest(src, width, height, x, y, dst, di) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    writeTransparentPixel(dst, di);
+    return;
+  }
+
+  const xi = Math.max(0, Math.min(width - 1, Math.round(x)));
+  const yi = Math.max(0, Math.min(height - 1, Math.round(y)));
+  copySampledPixel(src, (yi * width + xi) * 4, dst, di);
+}
+
 function sampleBilinear(src, width, height, x, y, dst, di) {
   if (!Number.isFinite(x) || !Number.isFinite(y)) {
-    dst[di] = 0; dst[di + 1] = 0; dst[di + 2] = 0; dst[di + 3] = 0;
+    writeTransparentPixel(dst, di);
     return;
   }
 
@@ -295,8 +305,11 @@ function sampleBilinear(src, width, height, x, y, dst, di) {
   const w01 = (1 - dx) * dy;
   const w11 = dx * dy;
 
-  dst[di] = src[i00] * w00 + src[i10] * w10 + src[i01] * w01 + src[i11] * w11;
-  dst[di + 1] = src[i00 + 1] * w00 + src[i10 + 1] * w10 + src[i01 + 1] * w01 + src[i11 + 1] * w11;
-  dst[di + 2] = src[i00 + 2] * w00 + src[i10 + 2] * w10 + src[i01 + 2] * w01 + src[i11 + 2] * w11;
-  dst[di + 3] = src[i00 + 3] * w00 + src[i10 + 3] * w10 + src[i01 + 3] * w01 + src[i11 + 3] * w11;
+  for (let channel = 0; channel < 4; channel += 1) {
+    dst[di + channel] =
+      src[i00 + channel] * w00 +
+      src[i10 + channel] * w10 +
+      src[i01 + channel] * w01 +
+      src[i11 + channel] * w11;
+  }
 }

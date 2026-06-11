@@ -7,6 +7,7 @@
   const fileInput = document.getElementById('fileInput');
   const loadSampleBtn = document.getElementById('loadSampleBtn');
   const resetWarpsBtn = document.getElementById('resetWarpsBtn');
+  const resetViewBtn = document.getElementById('resetViewBtn');
   const rectifyBtn = document.getElementById('rectifyBtn');
   const livePreviewToggle = document.getElementById('livePreviewToggle');
   const smoothPixelsToggle = document.getElementById('smoothPixelsToggle');
@@ -39,8 +40,11 @@
     selectedCorner: -1,
     selectedEdge: -1,
     selectedWarp: -1,
-    zoom: 1,
-    pan: { x: 0, y: 0 },
+    editorZoom: 1,
+    editorPan: createPan(),
+    outputZoom: 1,
+    outputPan: createPan(),
+    outputDragging: null,
     dragging: null,
     spaceDown: false,
     dimAmount: 0,
@@ -50,8 +54,13 @@
     livePreviewRendering: false,
     finalRendering: false,
     livePreviewPending: false,
+    livePreviewPendingQuality: null,
     livePreviewTimer: null,
     livePreviewRequestId: 0,
+    renderGeneration: 0,
+    finalRenderId: 0,
+    imageLoadSeq: 0,
+    dragImageDepth: 0,
     editorDrawRequested: false,
     renderWorker: null,
     renderWorkerSourceReady: false,
@@ -65,7 +74,7 @@
   };
   state.imageCtx = state.imageCanvas.getContext('2d', { willReadFrequently: true });
 
-  const ASSET_VERSION = '20260611-21';
+  const ASSET_VERSION = '20260611-38';
   const DEFAULT_OUTPUT_WIDTH = 1920;
   const DEFAULT_OUTPUT_HEIGHT = 1080;
   const DEMO_IMAGE_NAME = 'demo-photo';
@@ -90,6 +99,8 @@
   const EDGE_WARP_HANDLE_MAX_T = 0.92;
   const MAX_EDGE_WARPS = 6;
   const VIEW_PADDING = 38;
+  const LEFT_CANVAS_MIN_ZOOM = 0.1;
+  const LEFT_CANVAS_MAX_ZOOM = 32;
   const MAX_PIXELS = 50_000_000;
   const DIM_SLIDER_MAX = 0.6;
   const DIM_SLIDER_HIT_RADIUS = 18;
@@ -98,11 +109,19 @@
   const GRID_LINE_DRAW_STEPS = 14;
   const EDGE_HIT_TEST_STEPS = 18;
   const EDGE_WARP_ADD_STEPS = 48;
-  const LIVE_PREVIEW_MAX_LONG_EDGE = 900;
-  const LIVE_PREVIEW_MAX_PIXELS = 360_000;
-  const LIVE_PREVIEW_DEBOUNCE_MS = 140;
+  const LIVE_PREVIEW_FAST_MAX_LONG_EDGE = 900;
+  const LIVE_PREVIEW_FAST_MAX_PIXELS = 360_000;
+  const LIVE_PREVIEW_SHARP_MAX_LONG_EDGE = 1800;
+  const LIVE_PREVIEW_SHARP_MAX_PIXELS = 1_600_000;
+  const LIVE_PREVIEW_FAST_DEBOUNCE_MS = 100;
+  const LIVE_PREVIEW_SHARP_DEBOUNCE_MS = 450;
+  const OUTPUT_CANVAS_MIN_ZOOM = LEFT_CANVAS_MIN_ZOOM;
+  const OUTPUT_CANVAS_MAX_ZOOM = LEFT_CANVAS_MAX_ZOOM;
+  const VIEW_ZOOM_SENSITIVITY = 0.0011;
 
-
+  function createPan(x = 0, y = 0) {
+    return { x, y };
+  }
 
   function ensureRenderWorker() {
     if (state.renderWorkerUnavailable || typeof Worker === 'undefined') return null;
@@ -283,6 +302,33 @@
     copyBtn.disabled = !enabled;
   }
 
+  function clearLivePreviewTimer() {
+    if (!state.livePreviewTimer) return;
+    clearTimeout(state.livePreviewTimer);
+    state.livePreviewTimer = null;
+  }
+
+  function cancelActiveRenderJobs() {
+    clearLivePreviewTimer();
+    state.livePreviewRequestId += 1;
+    state.livePreviewPending = false;
+    state.livePreviewPendingQuality = null;
+
+    if (state.pendingWorkerSource) {
+      state.pendingWorkerSource.resolve(false);
+      state.pendingWorkerSource = null;
+    }
+
+    if (state.activeWorkerJobId != null) {
+      cancelWorkerJob(state.activeWorkerJobId);
+    }
+  }
+
+  function invalidateRenderGeneration() {
+    state.renderGeneration += 1;
+    cancelActiveRenderJobs();
+  }
+
   function resizeEditorCanvas() {
     const rect = editorCanvas.parentElement.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
@@ -313,10 +359,21 @@
       (width - VIEW_PADDING * 2) / state.image.width,
       (height - VIEW_PADDING * 2) / state.image.height,
     );
-    const scale = Math.max(0.02, base * state.zoom);
-    const x = (width - state.image.width * scale) / 2 + state.pan.x;
-    const y = (height - state.image.height * scale) / 2 + state.pan.y;
+    const scale = Math.max(0.02, base * state.editorZoom);
+    const x = (width - state.image.width * scale) / 2 + state.editorPan.x;
+    const y = (height - state.image.height * scale) / 2 + state.editorPan.y;
     return { scale, x, y };
+  }
+
+  function clearCanvasPixels(ctx, canvas) {
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.restore();
+  }
+
+  function clearEditorCanvas() {
+    clearCanvasPixels(editorCtx, editorCanvas);
   }
 
   function imageToScreen(point, t = getViewTransform()) {
@@ -340,11 +397,8 @@
     return quad.map(copyPoint);
   }
 
-
   function resetQuad() {
-    if (!state.image) {
-        return;
-    }
+    if (!state.image) return;
 
     if (state.usingDemoDefaults) {
       state.quad = copyQuad(DEMO_QUAD);
@@ -367,14 +421,14 @@
   }
 
   function fitView() {
-    state.zoom = 1;
-    state.pan = { x: 0, y: 0 };
+    state.editorZoom = 1;
+    state.editorPan = createPan();
     drawEditor();
   }
 
   function drawEditor() {
     const { width, height } = getEditorSize();
-    editorCtx.clearRect(0, 0, width, height);
+    clearEditorCanvas();
 
     if (!state.image) return;
 
@@ -549,10 +603,11 @@
   }
 
   function refreshGeometry() {
+    invalidateRenderGeneration();
     invalidateRenderedOutput();
     drawEditor();
     updateOutputSummary();
-    scheduleLivePreview();
+    scheduleLivePreview({ quality: 'sharp' });
   }
 
   function invalidateRenderedOutput() {
@@ -570,6 +625,23 @@
     clearSelection();
     refreshGeometry();
     setStatus('Warp handles reset. Each side has one centered warp handle.');
+  }
+
+  function resetView() {
+    let didReset = false;
+
+    if (state.image) {
+      fitView();
+      didReset = true;
+    }
+
+    if (state.lastOutputSize) {
+      resetOutputViewState();
+      applyOutputView();
+      didReset = true;
+    }
+
+    if (didReset) setStatus('Views reset.');
   }
 
   function getEdgeWarps(edgeIndex, warps = state.edgeWarps) {
@@ -829,9 +901,13 @@
     state.dimAmount = (1 - t) * DIM_SLIDER_MAX;
   }
 
-  function pointerPosition(event) {
-    const rect = editorCanvas.getBoundingClientRect();
+  function relativePointerPosition(event, element) {
+    const rect = element.getBoundingClientRect();
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  }
+
+  function pointerPosition(event) {
+    return relativePointerPosition(event, editorCanvas);
   }
 
   function hitTest(screenPoint) {
@@ -899,7 +975,6 @@
     };
   }
 
-
   function constrainCornerToAdjacentEdge(index, targetPoint, dragState, lockEnabled) {
     if (!lockEnabled) {
       dragState.cornerConstraint = null;
@@ -964,6 +1039,42 @@
     return moves[event.key] || null;
   }
 
+  function isEditableElement(element) {
+    return Boolean(element?.closest?.('input, textarea, select, [contenteditable="true"]'));
+  }
+
+  function getImageFileFromFileList(files) {
+    return Array.from(files || []).find(file => file.type?.startsWith('image/')) || null;
+  }
+
+  function getImageFileFromItems(items) {
+    for (const item of Array.from(items || [])) {
+      if (item.kind === 'file' && item.type?.startsWith('image/')) {
+        return item.getAsFile();
+      }
+    }
+    return null;
+  }
+
+  function getImageFileFromDataTransfer(dataTransfer) {
+    return getImageFileFromFileList(dataTransfer?.files) || getImageFileFromItems(dataTransfer?.items);
+  }
+
+  function dataTransferHasImage(dataTransfer) {
+    if (!dataTransfer) return false;
+    if (Array.from(dataTransfer.items || []).some(item => item.kind === 'file' && item.type?.startsWith('image/'))) return true;
+    return Array.from(dataTransfer.types || []).includes('Files');
+  }
+
+  function setImageDragActive(active) {
+    document.body.classList.toggle('is-dragging-image', active);
+  }
+
+  function resetImageDragState() {
+    state.dragImageDepth = 0;
+    setImageDragActive(false);
+  }
+
   editorCanvas.addEventListener('pointerdown', (event) => {
     if (!state.image) return;
     editorCanvas.setPointerCapture(event.pointerId);
@@ -981,7 +1092,7 @@
     const hit = hitTest(screen);
 
     if (state.spaceDown || event.button === 1) {
-      state.dragging = { type: 'pan', startScreen: screen, startPan: { ...state.pan } };
+      state.dragging = { type: 'pan', startScreen: screen, startPan: { ...state.editorPan } };
       editorCanvas.style.cursor = 'grabbing';
       return;
     }
@@ -1006,7 +1117,7 @@
     }
 
     if (event.button === 0) {
-      state.dragging = { type: 'pan', startScreen: screen, startPan: { ...state.pan } };
+      state.dragging = { type: 'pan', startScreen: screen, startPan: { ...state.editorPan } };
       clearSelection();
       editorCanvas.style.cursor = 'grabbing';
       drawEditor();
@@ -1054,8 +1165,8 @@
     }
 
     if (state.dragging.type === 'pan') {
-      state.pan.x = state.dragging.startPan.x + (screen.x - state.dragging.startScreen.x);
-      state.pan.y = state.dragging.startPan.y + (screen.y - state.dragging.startScreen.y);
+      state.editorPan.x = state.dragging.startPan.x + (screen.x - state.dragging.startScreen.x);
+      state.editorPan.y = state.dragging.startPan.y + (screen.y - state.dragging.startScreen.y);
       requestEditorDraw();
       return;
     }
@@ -1093,21 +1204,27 @@
     }
 
     requestEditorDraw();
+    invalidateRenderGeneration();
+    invalidateRenderedOutput();
     updateOutputSummary();
-    scheduleLivePreview();
+    scheduleLivePreview({ quality: 'fast' });
   });
 
   editorCanvas.addEventListener('pointerup', (event) => {
-    if (state.dragging) {
+    const completedDrag = state.dragging;
+    if (completedDrag) {
       editorCanvas.releasePointerCapture(event.pointerId);
       state.dragging = null;
       editorCanvas.style.cursor = 'grab';
+      if (isGeometryDrag(completedDrag)) scheduleLivePreview({ quality: 'sharp' });
     }
   });
 
   editorCanvas.addEventListener('pointercancel', () => {
+    const cancelledDrag = state.dragging;
     state.dragging = null;
     editorCanvas.style.cursor = 'grab';
+    if (isGeometryDrag(cancelledDrag)) scheduleLivePreview({ quality: 'sharp' });
   });
 
   editorCanvas.addEventListener('wheel', (event) => {
@@ -1115,11 +1232,11 @@
     event.preventDefault();
     const screen = pointerPosition(event);
     const before = screenToImage(screen);
-    const factor = Math.exp(-event.deltaY * 0.0011);
-    state.zoom = clamp(state.zoom * factor, 0.1, 12);
+    const factor = Math.exp(-event.deltaY * VIEW_ZOOM_SENSITIVITY);
+    state.editorZoom = clamp(state.editorZoom * factor, LEFT_CANVAS_MIN_ZOOM, LEFT_CANVAS_MAX_ZOOM);
     const after = imageToScreen(before);
-    state.pan.x += screen.x - after.x;
-    state.pan.y += screen.y - after.y;
+    state.editorPan.x += screen.x - after.x;
+    state.editorPan.y += screen.y - after.y;
     requestEditorDraw();
   }, { passive: false });
 
@@ -1161,14 +1278,65 @@
   fileInput.addEventListener('change', async () => {
     const file = fileInput.files?.[0];
     if (!file) return;
-    await loadImageFromUrl(URL.createObjectURL(file), file.name, true);
+    await loadImageFile(file);
+    fileInput.value = '';
   });
 
   loadSampleBtn.addEventListener('click', async () => {
     await loadImageFromUrl('sample.jpg', DEMO_IMAGE_NAME, false, { useDemoDefaults: true });
   });
 
+  window.addEventListener('paste', async (event) => {
+    if (isEditableElement(document.activeElement)) return;
+    const file = getImageFileFromItems(event.clipboardData?.items) || getImageFileFromFileList(event.clipboardData?.files);
+    if (!file) return;
+
+    event.preventDefault();
+    setStatus('Loading pasted image…');
+    await loadImageFile(file);
+  });
+
+  window.addEventListener('dragenter', (event) => {
+    if (!dataTransferHasImage(event.dataTransfer)) return;
+    event.preventDefault();
+    state.dragImageDepth += 1;
+    setImageDragActive(true);
+  });
+
+  window.addEventListener('dragover', (event) => {
+    if (!dataTransferHasImage(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    setImageDragActive(true);
+  });
+
+  window.addEventListener('dragleave', (event) => {
+    if (!dataTransferHasImage(event.dataTransfer)) return;
+    state.dragImageDepth = Math.max(0, state.dragImageDepth - 1);
+    if (state.dragImageDepth === 0) setImageDragActive(false);
+  });
+
+  window.addEventListener('drop', async (event) => {
+    const file = getImageFileFromDataTransfer(event.dataTransfer);
+    if (!file) return;
+
+    event.preventDefault();
+    resetImageDragState();
+    setStatus('Loading dropped image…');
+    await loadImageFile(file);
+  });
+
+  window.addEventListener('dragend', resetImageDragState);
+
   resetWarpsBtn.addEventListener('click', resetWarps);
+  resetViewBtn.addEventListener('click', resetView);
+
+  previewStage.addEventListener('pointerdown', handleOutputPointerDown);
+  previewStage.addEventListener('pointermove', handleOutputPointerMove);
+  previewStage.addEventListener('pointerup', handleOutputPointerUp);
+  previewStage.addEventListener('pointercancel', handleOutputPointerCancel);
+  previewStage.addEventListener('wheel', handleOutputWheel, { passive: false });
+  previewStage.addEventListener('dblclick', resetOutputView);
 
   [outWidthInput, outHeightInput].forEach(el => {
     el.addEventListener('input', refreshOutputSettings);
@@ -1196,7 +1364,7 @@
     state.livePreviewEnabled = livePreviewToggle.checked;
 
     if (state.livePreviewEnabled) {
-      setStatus('Live preview is on. Move the frame to update the corrected preview. Click Correct perspective for the full-resolution export.');
+      setStatus('Live preview is on. It renders quickly while dragging, then sharpens after you stop. Click Correct perspective for the full-resolution export.');
       scheduleLivePreview(true);
       return;
     }
@@ -1227,11 +1395,22 @@
       setStatus('Clipboard image copy is not supported in this browser. Use Download PNG instead.', 'danger');
       return;
     }
-    await navigator.clipboard.write([new ClipboardItem({ 'image/png': state.lastOutputBlob })]);
-    setStatus('Copied corrected image to clipboard.', 'success');
+
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': state.lastOutputBlob })]);
+      setStatus('Copied corrected image to clipboard.', 'success');
+    } catch (error) {
+      console.error('Clipboard copy failed:', error);
+      setStatus('Could not copy to the clipboard. Your browser may require permission or HTTPS; use Download PNG instead.', 'danger');
+    }
   });
 
+  function getSamplingMode() {
+    return exportSampling?.value || 'bilinear';
+  }
+
   function refreshOutputSettings() {
+    invalidateRenderGeneration();
     invalidateRenderedOutput();
     updateOutputSummary();
     scheduleLivePreview();
@@ -1242,14 +1421,51 @@
     refreshOutputSettings();
   }
 
+  function getDefaultOutputDimensions(useDemoDefaults = false) {
+    if (useDemoDefaults) {
+      return { width: DEMO_OUTPUT_WIDTH, height: DEMO_OUTPUT_HEIGHT };
+    }
+
+    if (state.imageCanvas.width > 0 && state.imageCanvas.height > 0) {
+      return { width: state.imageCanvas.width, height: state.imageCanvas.height };
+    }
+
+    if (state.image) {
+      return {
+        width: state.image.naturalWidth || state.image.width || DEFAULT_OUTPUT_WIDTH,
+        height: state.image.naturalHeight || state.image.height || DEFAULT_OUTPUT_HEIGHT,
+      };
+    }
+
+    return { width: DEFAULT_OUTPUT_WIDTH, height: DEFAULT_OUTPUT_HEIGHT };
+  }
+
   function applyOutputDefaults(useDemoDefaults) {
+    const { width, height } = getDefaultOutputDimensions(useDemoDefaults);
     outputMode.value = 'resolution';
-    outWidthInput.value = useDemoDefaults ? DEMO_OUTPUT_WIDTH : DEFAULT_OUTPUT_WIDTH;
-    outHeightInput.value = useDemoDefaults ? DEMO_OUTPUT_HEIGHT : DEFAULT_OUTPUT_HEIGHT;
+    outWidthInput.value = width;
+    outHeightInput.value = height;
     syncOutputModeVisibility();
   }
 
+  async function loadImageFile(file) {
+    if (!file || !file.type?.startsWith('image/')) {
+      setStatus('That file is not an image.', 'danger');
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(file);
+    await loadImageFromUrl(objectUrl, file.name, true);
+  }
+
   async function loadImageFromUrl(url, name, revokeAfterLoad = false, options = {}) {
+    const loadId = ++state.imageLoadSeq;
+    invalidateRenderGeneration();
+    state.finalRenderId += 1;
+    state.finalRendering = false;
+    rectifyBtn.disabled = true;
+    setExportButtonsEnabled(false);
+
     const img = new Image();
     img.decoding = 'async';
 
@@ -1261,11 +1477,14 @@
 
     if (revokeAfterLoad) URL.revokeObjectURL(url);
 
+    if (loadId !== state.imageLoadSeq) return;
+
     if (!loaded) {
       setStatus('Could not load that image.', 'danger');
       return;
     }
 
+    invalidateRenderGeneration();
     state.image = img;
     state.imageName = name || 'image';
     state.imageCanvas.width = img.naturalWidth || img.width;
@@ -1274,7 +1493,13 @@
     state.imageCtx.imageSmoothingEnabled = false;
     state.imageCtx.drawImage(img, 0, 0, state.imageCanvas.width, state.imageCanvas.height);
     state.imageData = state.imageCtx.getImageData(0, 0, state.imageCanvas.width, state.imageCanvas.height);
-    await setRenderWorkerSource();
+
+    const sourceReady = await setRenderWorkerSource();
+    if (loadId !== state.imageLoadSeq) return;
+    if (!sourceReady && state.renderWorker && !state.renderWorkerUnavailable) {
+      setStatus('Image loaded, but the render worker source was replaced. Try again if rendering does not start.', 'danger');
+    }
+
     state.lastOutputBlob = null;
     state.dimAmount = 0;
     state.usingDemoDefaults = Boolean(options.useDemoDefaults);
@@ -1289,15 +1514,16 @@
     refreshOutputSettings();
     scheduleLivePreview(true);
     setProgress(null);
-    setStatus(`Loaded ${state.imageName} at ${state.image.width} × ${state.image.height}. Align the frame, then correct perspective.`);
+    setStatus(`Loaded ${state.imageName} at ${state.image.width} × ${state.image.height}. Output defaults to source resolution; align the frame, then correct perspective.`);
   }
 
   function getOutputSize() {
     const mode = outputMode.value;
     if (mode === 'resolution') {
+      const defaults = getDefaultOutputDimensions(state.usingDemoDefaults);
       return {
-        width: sanePositiveInt(outWidthInput.value, DEFAULT_OUTPUT_WIDTH),
-        height: sanePositiveInt(outHeightInput.value, DEFAULT_OUTPUT_HEIGHT),
+        width: sanePositiveInt(outWidthInput.value, defaults.width),
+        height: sanePositiveInt(outHeightInput.value, defaults.height),
       };
     }
 
@@ -1324,14 +1550,24 @@
 
   async function renderPerspective() {
     if (!state.image || !state.quad) return;
+
+    const renderGeneration = ++state.renderGeneration;
+    const finalRenderId = ++state.finalRenderId;
+    cancelActiveRenderJobs();
+
     const { width: outW, height: outH } = getOutputSize();
     const pixels = outW * outH;
     if (pixels > MAX_PIXELS) {
       throw new Error(`Output is ${(pixels / 1_000_000).toFixed(1)} MP. Keep it under ${(MAX_PIXELS / 1_000_000).toFixed(0)} MP for browser rendering.`);
     }
 
+    const isCurrentRender = () => state.renderGeneration === renderGeneration && state.finalRenderId === finalRenderId;
+    const isCancelled = () => !isCurrentRender() || !state.image || !state.quad;
+
     state.finalRendering = true;
-    state.livePreviewRequestId += 1;
+    state.livePreviewPending = false;
+    state.livePreviewPendingQuality = null;
+    clearLivePreviewTimer();
     rectifyBtn.disabled = true;
     setExportButtonsEnabled(false);
     setProgress(0);
@@ -1339,26 +1575,44 @@
 
     try {
       await nextFrame();
-      const sampling = exportSampling?.value || 'bilinear';
-      const out = await buildPerspectiveImage(outW, outH, value => setProgress(value), () => false, sampling);
-      if (!out) {
-        rectifyBtn.disabled = false;
-        setExportButtonsEnabled(Boolean(state.lastOutputBlob));
-        setProgress(null);
-        return;
-      }
+      if (isCancelled()) return;
 
-      displayOutput(out, outW, outH, `${outW} × ${outH}`);
+      const sampling = getSamplingMode();
+      const out = await buildPerspectiveImage(
+        outW,
+        outH,
+        value => {
+          if (isCurrentRender()) setProgress(value);
+        },
+        isCancelled,
+        sampling,
+      );
 
-      state.lastOutputBlob = await canvasToBlob(outputCanvas);
+      if (!out || isCancelled()) return;
+
+      const blob = await imageDataToBlob(out, outW, outH);
+      if (isCancelled()) return;
+
+      state.lastOutputBlob = blob;
+      displayOutput(out, outW, outH, `${outW} × ${outH}`, { preserveView: true });
       setExportButtonsEnabled(true);
       rectifyBtn.disabled = false;
       setProgress(100);
       const samplingLabel = sampling === 'nearest' ? 'sharp nearest-neighbor' : 'smooth bilinear';
       setStatus(`Done. Export is ${outW} × ${outH} (${samplingLabel}).`, 'success');
-      setTimeout(() => setProgress(null), 650);
+      setTimeout(() => {
+        if (isCurrentRender()) setProgress(null);
+      }, 650);
     } finally {
-      state.finalRendering = false;
+      if (state.finalRenderId === finalRenderId) {
+        state.finalRendering = false;
+        rectifyBtn.disabled = !state.image;
+        setExportButtonsEnabled(Boolean(state.lastOutputBlob));
+        if (state.renderGeneration !== renderGeneration) {
+          setProgress(null);
+          if (state.livePreviewEnabled && state.image && state.quad) scheduleLivePreview(true);
+        }
+      }
     }
   }
 
@@ -1415,12 +1669,35 @@
     };
   }
 
-  function getLivePreviewSize() {
+  function isGeometryDrag(drag) {
+    return drag?.type === 'corner' || drag?.type === 'sideWarp' || drag?.type === 'edge';
+  }
+
+  function normalizeLivePreviewQuality(quality) {
+    return quality === 'fast' ? 'fast' : 'sharp';
+  }
+
+  function getLivePreviewConfig(quality) {
+    return normalizeLivePreviewQuality(quality) === 'fast'
+      ? {
+        maxLongEdge: LIVE_PREVIEW_FAST_MAX_LONG_EDGE,
+        maxPixels: LIVE_PREVIEW_FAST_MAX_PIXELS,
+        debounceMs: LIVE_PREVIEW_FAST_DEBOUNCE_MS,
+      }
+      : {
+        maxLongEdge: LIVE_PREVIEW_SHARP_MAX_LONG_EDGE,
+        maxPixels: LIVE_PREVIEW_SHARP_MAX_PIXELS,
+        debounceMs: LIVE_PREVIEW_SHARP_DEBOUNCE_MS,
+      };
+  }
+
+  function getLivePreviewSize(quality = 'sharp') {
     const { width, height } = getOutputSize();
+    const { maxLongEdge, maxPixels } = getLivePreviewConfig(quality);
     const scale = Math.min(
       1,
-      LIVE_PREVIEW_MAX_LONG_EDGE / Math.max(width, height),
-      Math.sqrt(LIVE_PREVIEW_MAX_PIXELS / Math.max(1, width * height)),
+      maxLongEdge / Math.max(width, height),
+      Math.sqrt(maxPixels / Math.max(1, width * height)),
     );
 
     return {
@@ -1429,16 +1706,18 @@
     };
   }
 
-  function scheduleLivePreview(immediate = false) {
+  function scheduleLivePreview(options = {}) {
     if (!state.livePreviewEnabled || !state.image || !state.quad || state.finalRendering) return;
+
+    const normalizedOptions = typeof options === 'boolean' ? { immediate: options } : options;
+    const quality = normalizeLivePreviewQuality(normalizedOptions.quality);
+    const { debounceMs } = getLivePreviewConfig(quality);
 
     state.livePreviewRequestId += 1;
     state.livePreviewPending = true;
+    state.livePreviewPendingQuality = quality;
 
-    if (state.livePreviewTimer) {
-      clearTimeout(state.livePreviewTimer);
-      state.livePreviewTimer = null;
-    }
+    clearLivePreviewTimer();
 
     if (state.livePreviewRendering) return;
 
@@ -1448,88 +1727,217 @@
         console.error(error);
         setStatus(error.message || 'Live preview failed.', 'danger');
       });
-    }, immediate ? 0 : LIVE_PREVIEW_DEBOUNCE_MS);
+    }, normalizedOptions.immediate ? 0 : debounceMs);
   }
 
   async function renderQueuedLivePreview() {
     if (!state.livePreviewEnabled || !state.image || !state.quad || state.finalRendering) return;
     if (state.livePreviewRendering) return;
 
+    const quality = normalizeLivePreviewQuality(state.livePreviewPendingQuality);
     state.livePreviewPending = false;
+    state.livePreviewPendingQuality = null;
     state.livePreviewRendering = true;
     const requestId = state.livePreviewRequestId;
 
     try {
-      const { width: previewW, height: previewH } = getLivePreviewSize();
+      const { width: previewW, height: previewH } = getLivePreviewSize(quality);
+      const sampling = getSamplingMode();
       const out = await buildPerspectiveImage(
         previewW,
         previewH,
         null,
         () => requestId !== state.livePreviewRequestId || !state.livePreviewEnabled,
-        'nearest',
+        sampling,
       );
 
       if (!out || requestId !== state.livePreviewRequestId || !state.livePreviewEnabled) return;
 
-      displayOutput(out, previewW, previewH, `Live preview · ${previewW} × ${previewH}`);
+      const preserveOutputView = Boolean(state.lastOutputSize);
+      const qualityLabel = quality === 'fast' ? 'fast' : 'sharp';
+      displayOutput(out, previewW, previewH, `Live preview ${qualityLabel} · ${previewW} × ${previewH}`, {
+        preserveView: preserveOutputView,
+      });
 
       state.lastOutputBlob = null;
       setExportButtonsEnabled(false);
     } finally {
       state.livePreviewRendering = false;
-      if (!state.finalRendering && (state.livePreviewPending || state.livePreviewRequestId !== requestId)) {
+      if (!state.finalRendering && !state.lastOutputBlob && (state.livePreviewPending || state.livePreviewRequestId !== requestId)) {
+        const pendingQuality = state.livePreviewPendingQuality || 'sharp';
         state.livePreviewPending = false;
-        scheduleLivePreview(true);
+        state.livePreviewPendingQuality = null;
+        scheduleLivePreview({ immediate: true, quality: pendingQuality });
       }
     }
+  }
+
+  function setOutputCanvasFrame({ left = 0, top = 0, width = 0, height = 0 } = {}) {
+    outputCanvas.style.width = `${width}px`;
+    outputCanvas.style.height = `${height}px`;
+    outputCanvas.style.left = `${left}px`;
+    outputCanvas.style.top = `${top}px`;
   }
 
   function resetOutputPreview() {
     outputCanvas.width = 1;
     outputCanvas.height = 1;
-    outputCtx.clearRect(0, 0, 1, 1);
-    outputCanvas.style.width = '0px';
-    outputCanvas.style.height = '0px';
+    clearCanvasPixels(outputCtx, outputCanvas);
+    setOutputCanvasFrame();
+    resetOutputViewState();
+    state.outputDragging = null;
     state.lastOutputSize = null;
     previewMeta.textContent = 'No output yet';
     previewPlaceholder.classList.remove('hidden');
+    previewStage?.classList.remove('has-output', 'is-panning');
   }
 
-  function displayOutput(imageData, width, height, metaText) {
+  function displayOutput(imageData, width, height, metaText, options = {}) {
+    const previousSize = state.lastOutputSize;
+    const shouldResetOutputView = !options.preserveView && (
+      !previousSize || previousSize.width !== width || previousSize.height !== height
+    );
+
     outputCanvas.width = width;
     outputCanvas.height = height;
     outputCtx.putImageData(imageData, 0, 0);
     state.lastOutputSize = { width, height };
+
+    if (shouldResetOutputView) resetOutputViewState();
+
     previewMeta.textContent = metaText;
     previewPlaceholder.classList.add('hidden');
-    fitOutputPreviewCanvas();
+    previewStage?.classList.add('has-output');
+    applyOutputView();
   }
 
-  function fitOutputPreviewCanvas() {
-    if (!state.lastOutputSize || !previewStage) {
-      outputCanvas.style.width = '0px';
-      outputCanvas.style.height = '0px';
-      return;
-    }
+  function resetOutputViewState() {
+    state.outputZoom = 1;
+    state.outputPan = createPan();
+  }
+
+  function resetOutputView(event) {
+    if (!state.lastOutputSize) return;
+    event?.preventDefault?.();
+    resetOutputViewState();
+    applyOutputView();
+    setStatus('Preview view reset.');
+  }
+
+  function getOutputViewLayout() {
+    if (!state.lastOutputSize || !previewStage) return null;
 
     const stageRect = previewStage.getBoundingClientRect();
-    const availableW = Math.max(1, stageRect.width - 2);
-    const availableH = Math.max(1, stageRect.height - 2);
+    const stageW = Math.max(1, stageRect.width);
+    const stageH = Math.max(1, stageRect.height);
+    const availableW = Math.max(1, stageW - 2);
+    const availableH = Math.max(1, stageH - 2);
     const outputAspect = state.lastOutputSize.width / state.lastOutputSize.height;
     const stageAspect = availableW / availableH;
 
-    let cssW;
-    let cssH;
+    let baseW;
+    let baseH;
     if (stageAspect > outputAspect) {
-      cssH = availableH;
-      cssW = cssH * outputAspect;
+      baseH = availableH;
+      baseW = baseH * outputAspect;
     } else {
-      cssW = availableW;
-      cssH = cssW / outputAspect;
+      baseW = availableW;
+      baseH = baseW / outputAspect;
     }
 
-    outputCanvas.style.width = `${Math.floor(cssW)}px`;
-    outputCanvas.style.height = `${Math.floor(cssH)}px`;
+    const cssW = Math.max(1, baseW * state.outputZoom);
+    const cssH = Math.max(1, baseH * state.outputZoom);
+
+    return {
+      stageW,
+      stageH,
+      baseW,
+      baseH,
+      cssW,
+      cssH,
+      left: (stageW - cssW) / 2 + state.outputPan.x,
+      top: (stageH - cssH) / 2 + state.outputPan.y,
+    };
+  }
+
+  function applyOutputView() {
+    const layout = getOutputViewLayout();
+    if (!layout) {
+      setOutputCanvasFrame();
+      return;
+    }
+
+    setOutputCanvasFrame({
+      left: layout.left,
+      top: layout.top,
+      width: layout.cssW,
+      height: layout.cssH,
+    });
+  }
+
+  function outputPointerPosition(event) {
+    return relativePointerPosition(event, previewStage);
+  }
+
+  function handleOutputPointerDown(event) {
+    if (!state.lastOutputSize || event.button > 1) return;
+    event.preventDefault();
+    previewStage.setPointerCapture(event.pointerId);
+    const screen = outputPointerPosition(event);
+    state.outputDragging = {
+      pointerId: event.pointerId,
+      startScreen: screen,
+      startPan: { ...state.outputPan },
+    };
+    previewStage.classList.add('is-panning');
+  }
+
+  function handleOutputPointerMove(event) {
+    if (!state.outputDragging) return;
+    event.preventDefault();
+    const screen = outputPointerPosition(event);
+    state.outputPan.x = state.outputDragging.startPan.x + (screen.x - state.outputDragging.startScreen.x);
+    state.outputPan.y = state.outputDragging.startPan.y + (screen.y - state.outputDragging.startScreen.y);
+    applyOutputView();
+  }
+
+  function endOutputDrag(event) {
+    if (event && previewStage.hasPointerCapture(event.pointerId)) {
+      previewStage.releasePointerCapture(event.pointerId);
+    }
+    state.outputDragging = null;
+    previewStage.classList.remove('is-panning');
+  }
+
+  function handleOutputPointerUp(event) {
+    if (!state.outputDragging) return;
+    endOutputDrag(event);
+  }
+
+  function handleOutputPointerCancel(event) {
+    endOutputDrag(event);
+  }
+
+  function handleOutputWheel(event) {
+    if (!state.lastOutputSize) return;
+    event.preventDefault();
+
+    const layout = getOutputViewLayout();
+    if (!layout) return;
+
+    const screen = outputPointerPosition(event);
+    const contentX = (screen.x - layout.left) / layout.cssW;
+    const contentY = (screen.y - layout.top) / layout.cssH;
+    const factor = Math.exp(-event.deltaY * VIEW_ZOOM_SENSITIVITY);
+    const nextZoom = clamp(state.outputZoom * factor, OUTPUT_CANVAS_MIN_ZOOM, OUTPUT_CANVAS_MAX_ZOOM);
+    if (nextZoom === state.outputZoom) return;
+
+    const nextCssW = Math.max(1, layout.baseW * nextZoom);
+    const nextCssH = Math.max(1, layout.baseH * nextZoom);
+    state.outputZoom = nextZoom;
+    state.outputPan.x = screen.x - (layout.stageW - nextCssW) / 2 - contentX * nextCssW;
+    state.outputPan.y = screen.y - (layout.stageH - nextCssH) / 2 - contentY * nextCssH;
+    applyOutputView();
   }
 
   function nextFrame() {
@@ -1541,6 +1949,15 @@
       .replace(/\.[^.]+$/, '')
       .replace(/[^a-z0-9-_]+/gi, '-')
       .replace(/^-+|-+$/g, '') || 'adjusted';
+  }
+
+  function imageDataToBlob(imageData, width, height) {
+    const exportCanvas = document.createElement('canvas');
+    exportCanvas.width = width;
+    exportCanvas.height = height;
+    const exportCtx = exportCanvas.getContext('2d');
+    exportCtx.putImageData(imageData, 0, 0);
+    return canvasToBlob(exportCanvas);
   }
 
   function canvasToBlob(canvas) {
@@ -1602,24 +2019,34 @@
     };
   }
 
-  function sampleNearest(src, width, height, x, y, dst, di) {
-    if (!Number.isFinite(x) || !Number.isFinite(y)) {
-      dst[di] = 0; dst[di + 1] = 0; dst[di + 2] = 0; dst[di + 3] = 0;
-      return;
-    }
+  function writeTransparentPixel(dst, di) {
+    dst[di] = 0;
+    dst[di + 1] = 0;
+    dst[di + 2] = 0;
+    dst[di + 3] = 0;
+  }
 
-    const xi = Math.max(0, Math.min(width - 1, Math.round(x)));
-    const yi = Math.max(0, Math.min(height - 1, Math.round(y)));
-    const si = (yi * width + xi) * 4;
+  function copySampledPixel(src, si, dst, di) {
     dst[di] = src[si];
     dst[di + 1] = src[si + 1];
     dst[di + 2] = src[si + 2];
     dst[di + 3] = src[si + 3];
   }
 
+  function sampleNearest(src, width, height, x, y, dst, di) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      writeTransparentPixel(dst, di);
+      return;
+    }
+
+    const xi = Math.max(0, Math.min(width - 1, Math.round(x)));
+    const yi = Math.max(0, Math.min(height - 1, Math.round(y)));
+    copySampledPixel(src, (yi * width + xi) * 4, dst, di);
+  }
+
   function sampleBilinear(src, width, height, x, y, dst, di) {
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
-      dst[di] = 0; dst[di + 1] = 0; dst[di + 2] = 0; dst[di + 3] = 0;
+      writeTransparentPixel(dst, di);
       return;
     }
 
@@ -1643,13 +2070,16 @@
     const w01 = (1 - dx) * dy;
     const w11 = dx * dy;
 
-    dst[di] = src[i00] * w00 + src[i10] * w10 + src[i01] * w01 + src[i11] * w11;
-    dst[di + 1] = src[i00 + 1] * w00 + src[i10 + 1] * w10 + src[i01 + 1] * w01 + src[i11 + 1] * w11;
-    dst[di + 2] = src[i00 + 2] * w00 + src[i10 + 2] * w10 + src[i01 + 2] * w01 + src[i11 + 2] * w11;
-    dst[di + 3] = src[i00 + 3] * w00 + src[i10 + 3] * w10 + src[i01 + 3] * w01 + src[i11 + 3] * w11;
+    for (let channel = 0; channel < 4; channel += 1) {
+      dst[di + channel] =
+        src[i00 + channel] * w00 +
+        src[i10 + channel] * w10 +
+        src[i01 + channel] * w01 +
+        src[i11 + channel] * w11;
+    }
   }
 
   new ResizeObserver(resizeEditorCanvas).observe(editorCanvas.parentElement);
-  if (previewStage) new ResizeObserver(fitOutputPreviewCanvas).observe(previewStage);
+  if (previewStage) new ResizeObserver(applyOutputView).observe(previewStage);
   updateOutputSummary();
 })();

@@ -12,7 +12,7 @@
   <meta property="og:image" content="sample.jpg" />
   <meta name="twitter:card" content="summary_large_image" />
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
-  <link rel="stylesheet" href="styles.css?v=20260611-21" />
+  <link rel="stylesheet" href="styles.css?v=20260611-38" />
 </head>
 <body>
   <main class="app-shell">
@@ -34,10 +34,13 @@
         <section class="control-group">
           <h2>1. Align the frame</h2>
           <p class="muted compact">Drag the corner handles onto the screenshot corners (see demo for example). Drag a side line to move the whole side. Drag side handles to warp the side of the selection</p>
-          <button id="resetWarpsBtn" class="secondary reset-warps-button">Reset warps</button>
+          <div class="button-row align-frame-actions">
+            <button id="resetWarpsBtn" class="secondary">Reset warps</button>
+            <button id="resetViewBtn" class="secondary">Reset view</button>
+          </div>
           <div class="hint-card">
-            <span>Wheel</span> zooms <span>Left-click drag</span> pans canvas <span>Right-click edge</span> adds warp handle <span>Right-click handle</span> deletes it<br>
-            <span>Hold shift and drag corner</span> constrain handles <span>Arrow keys</span> nudge selected corner or side warp
+            <span>Paste/drop</span> loads an image <span>Wheel</span> zooms left canvas <span>Left-click drag</span> pans left canvas <span>Right-click edge</span> adds warp handle <span>Right-click handle</span> deletes it<br>
+            <span>Right preview</span> wheel zooms, drag pans, double-click resets <span>Hold shift and drag corner</span> constrains handles <span>Arrow keys</span> nudge selected corner or side warp
           </div>
         </section>
 
@@ -109,7 +112,7 @@
           <div id="emptyState" class="empty-state">
             <div class="empty-icon">▱</div>
             <h2>Load the photo</h2>
-            <p>Then place the four-point frame around the screenshot area.</p>
+            <p>Open, paste, or drop an image, then place the four-point frame around the screenshot area.</p>
           </div>
         </div>
 
@@ -130,6 +133,6 @@
     </section>
   </main>
 
-  <script src="app.js?v=20260611-21"></script>
+  <script src="app.js?v=20260611-38"></script>
 </body>
 </html>
