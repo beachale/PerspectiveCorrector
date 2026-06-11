@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PerspectiveCorrector — Perspective Screenshot Tool</title>
+  <meta name="description" content="Correct perspective distortion in screenshots and photos with corner handles, side warps, live preview, and PNG export." />
+  <meta name="theme-color" content="#1f1f1f" />
+  <meta property="og:title" content="PerspectiveCorrector" />
+  <meta property="og:description" content="Correct perspective distortion with corner handles, side warps, live preview, and PNG export." />
+  <meta property="og:type" content="website" />
+  <meta property="og:image" content="sample.jpg" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="stylesheet" href="styles.css?v=20260611-21" />
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <h1>PerspectiveCorrector</h1>
+      </div>
+      <div class="topbar-actions">
+        <label class="file-button">
+          <input id="fileInput" type="file" accept="image/*" />
+          Open image
+        </label>
+        <button id="loadSampleBtn" class="ghost">Load demo photo</button>
+      </div>
+    </header>
+
+    <section class="workspace">
+      <aside class="panel controls-panel">
+        <section class="control-group">
+          <h2>1. Align the frame</h2>
+          <p class="muted compact">Drag the corner handles onto the screenshot corners (see demo for example). Drag a side line to move the whole side. Drag side handles to warp the side of the selection</p>
+          <button id="resetWarpsBtn" class="secondary reset-warps-button">Reset warps</button>
+          <div class="hint-card">
+            <span>Wheel</span> zooms <span>Left-click drag</span> pans canvas <span>Right-click edge</span> adds warp handle <span>Right-click handle</span> deletes it<br>
+            <span>Hold shift and drag corner</span> constrain handles <span>Arrow keys</span> nudge selected corner or side warp
+          </div>
+        </section>
+
+        <section class="control-group">
+          <h2>2. Output shape</h2>
+          <div class="field-grid two-cols output-option-grid">
+            <label>
+              <span>Mode</span>
+              <select id="outputMode">
+                <option value="resolution">Exact</option>
+                <option value="auto">Auto</option>
+              </select>
+            </label>
+            <label>
+              <span>Sampling</span>
+              <select id="exportSampling">
+                <option value="bilinear">Smooth</option>
+                <option value="nearest">Sharp</option>
+              </select>
+            </label>
+          </div>
+
+          <div id="resolutionFields" class="field-grid two-cols">
+            <label>
+              <span>Width</span>
+              <input id="outWidth" type="number" min="1" step="1" value="1920" />
+            </label>
+            <label>
+              <span>Height</span>
+              <input id="outHeight" type="number" min="1" step="1" value="1080" />
+            </label>
+          </div>
+
+          <div class="output-summary">
+            <span>Final canvas</span>
+            <strong id="outputSummary">1920 × 1080</strong>
+          </div>
+        </section>
+
+        <section class="control-group">
+          <h2>3. Finalize</h2>
+          <button id="rectifyBtn" class="primary" disabled>Correct perspective</button>
+          <label class="toggle-control" for="livePreviewToggle">
+            <input id="livePreviewToggle" type="checkbox" />
+            <span class="toggle-switch" aria-hidden="true"></span>
+            <span class="toggle-text">
+              <strong>Live preview</strong>
+              <small>Update the corrected output while you move the frame.</small>
+            </span>
+          </label>
+          <div class="progress-shell hidden" id="progressShell">
+            <div class="progress-bar" id="progressBar"></div>
+          </div>
+          <p id="statusText" class="status">Open an image to begin.</p>
+          <div class="button-row">
+            <button id="downloadBtn" class="secondary" disabled>Download PNG</button>
+            <button id="copyBtn" class="secondary" disabled>Copy image</button>
+          </div>
+        </section>
+      </aside>
+
+      <section class="editor-column">
+        <div class="canvas-wrap panel">
+          <label class="canvas-toggle smooth-pixels-toggle" for="smoothPixelsToggle">
+            <input id="smoothPixelsToggle" type="checkbox" />
+            <span>Smooth pixels</span>
+          </label>
+          <canvas id="editorCanvas"></canvas>
+          <div id="emptyState" class="empty-state">
+            <div class="empty-icon">▱</div>
+            <h2>Load the photo</h2>
+            <p>Then place the four-point frame around the screenshot area.</p>
+          </div>
+        </div>
+
+        <div class="preview-panel panel">
+          <div class="preview-header">
+            <div>
+              <p class="eyebrow">Preview</p>
+              <h2>Corrected output</h2>
+            </div>
+            <span id="previewMeta" class="pill">No output yet</span>
+          </div>
+          <div class="preview-stage">
+            <canvas id="outputCanvas"></canvas>
+            <p id="previewPlaceholder">The adjusted image will appear here.</p>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script src="app.js?v=20260611-21"></script>
+</body>
+</html>
