@@ -1,3 +1,5 @@
+const DEFAULT_SAMPLING = 'nearest';
+
 let source = null;
 let activeJobId = null;
 const cancelledJobs = new Set();
@@ -48,12 +50,12 @@ async function renderPerspective(job) {
   const outH = job.height;
   const outData = new Uint8ClampedArray(outW * outH * 4);
   const mapOutputPoint = createOutputToImageMapper(outW, outH, job.quad, job.warps);
-  const samplePixel = job.sampling === 'nearest' ? sampleNearest : sampleBilinear;
+  const samplePixel = getSamplePixelFunction(job.sampling || DEFAULT_SAMPLING);
   const rowsPerYield = Math.max(4, Math.floor(130000 / outW));
 
   for (let y = 0; y < outH; y += 1) {
     for (let x = 0; x < outW; x += 1) {
-      const mapped = mapOutputPoint(x, y);
+      const mapped = mapOutputPoint(x + 0.5, y + 0.5);
       samplePixel(source.data, source.width, source.height, mapped.x, mapped.y, outData, (y * outW + x) * 4);
     }
 
@@ -86,6 +88,10 @@ async function renderPerspective(job) {
   }, [outData.buffer]);
 }
 
+function getSamplePixelFunction(sampling) {
+  return sampling === 'nearest' ? sampleNearest : sampleBilinear;
+}
+
 function yieldToMessages() {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
@@ -93,9 +99,9 @@ function yieldToMessages() {
 function createOutputToImageMapper(outW, outH, quad, warps) {
   const dstRect = [
     { x: 0, y: 0 },
-    { x: outW - 1, y: 0 },
-    { x: outW - 1, y: outH - 1 },
-    { x: 0, y: outH - 1 },
+    { x: outW, y: 0 },
+    { x: outW, y: outH },
+    { x: 0, y: outH },
   ];
   const H = solveHomography(dstRect, quad);
   const useWarp = hasSideWarp(warps);
@@ -104,8 +110,8 @@ function createOutputToImageMapper(outW, outH, quad, warps) {
     const base = applyHomography(H, x, y);
     if (!useWarp) return base;
 
-    const u = outW > 1 ? x / (outW - 1) : 0;
-    const v = outH > 1 ? y / (outH - 1) : 0;
+    const u = outW > 0 ? x / outW : 0;
+    const v = outH > 0 ? y / outH : 0;
     const displacement = getWarpDisplacement(u, v, quad, warps);
     return {
       x: base.x + displacement.x,
@@ -268,14 +274,21 @@ function copySampledPixel(src, si, dst, di) {
   dst[di + 3] = src[si + 3];
 }
 
+function clampSampleCenter(value, size) {
+  return Math.max(0.5, Math.min(size - 0.5, value));
+}
+
 function sampleNearest(src, width, height, x, y, dst, di) {
   if (!Number.isFinite(x) || !Number.isFinite(y)) {
     writeTransparentPixel(dst, di);
     return;
   }
 
-  const xi = Math.max(0, Math.min(width - 1, Math.round(x)));
-  const yi = Math.max(0, Math.min(height - 1, Math.round(y)));
+  x = clampSampleCenter(x, width);
+  y = clampSampleCenter(y, height);
+
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
   copySampledPixel(src, (yi * width + xi) * 4, dst, di);
 }
 
@@ -285,15 +298,17 @@ function sampleBilinear(src, width, height, x, y, dst, di) {
     return;
   }
 
-  x = Math.max(0, Math.min(width - 1, x));
-  y = Math.max(0, Math.min(height - 1, y));
+  x = clampSampleCenter(x, width);
+  y = clampSampleCenter(y, height);
 
-  const x0 = Math.floor(x);
-  const y0 = Math.floor(y);
+  const sampleX = x - 0.5;
+  const sampleY = y - 0.5;
+  const x0 = Math.floor(sampleX);
+  const y0 = Math.floor(sampleY);
   const x1 = Math.min(width - 1, x0 + 1);
   const y1 = Math.min(height - 1, y0 + 1);
-  const dx = x - x0;
-  const dy = y - y0;
+  const dx = sampleX - x0;
+  const dy = sampleY - y0;
 
   const i00 = (y0 * width + x0) * 4;
   const i10 = (y0 * width + x1) * 4;
