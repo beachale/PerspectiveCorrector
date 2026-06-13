@@ -105,6 +105,7 @@ function createOutputToImageMapper(outW, outH, quad, warps) {
   ];
   const H = solveHomography(dstRect, quad);
   const useWarp = hasSideWarp(warps);
+  const edgeCache = useWarp ? createEdgeCurveCache(quad, warps) : null;
 
   return (x, y) => {
     const base = applyHomography(H, x, y);
@@ -112,7 +113,7 @@ function createOutputToImageMapper(outW, outH, quad, warps) {
 
     const u = outW > 0 ? x / outW : 0;
     const v = outH > 0 ? y / outH : 0;
-    const displacement = getWarpDisplacement(u, v, quad, warps);
+    const displacement = getWarpDisplacement(u, v, quad, warps, edgeCache);
     return {
       x: base.x + displacement.x,
       y: base.y + displacement.y,
@@ -120,17 +121,17 @@ function createOutputToImageMapper(outW, outH, quad, warps) {
   };
 }
 
-function getWarpDisplacement(u, v, quad, warps) {
-  const warped = coonsPatchPoint(u, v, quad, warps);
+function getWarpDisplacement(u, v, quad, warps, edgeCache = null) {
+  const warped = coonsPatchPoint(u, v, quad, warps, edgeCache);
   const straight = bilinearPatchPoint(u, v, quad);
   return { x: warped.x - straight.x, y: warped.y - straight.y };
 }
 
-function coonsPatchPoint(u, v, quad, warps) {
-  const top = getEdgeCurvePoint(0, u, quad, warps);
-  const right = getEdgeCurvePoint(1, v, quad, warps);
-  const bottom = getEdgeCurvePoint(2, 1 - u, quad, warps);
-  const left = getEdgeCurvePoint(3, 1 - v, quad, warps);
+function coonsPatchPoint(u, v, quad, warps, edgeCache = null) {
+  const top = getEdgeCurvePoint(0, u, quad, warps, edgeCache);
+  const right = getEdgeCurvePoint(1, v, quad, warps, edgeCache);
+  const bottom = getEdgeCurvePoint(2, 1 - u, quad, warps, edgeCache);
+  const left = getEdgeCurvePoint(3, 1 - v, quad, warps, edgeCache);
   const bilinear = bilinearPatchPoint(u, v, quad);
 
   return {
@@ -147,7 +148,9 @@ function bilinearPatchPoint(u, v, quad) {
   };
 }
 
-function getEdgeCurvePoint(edgeIndex, t, quad, warps) {
+function getEdgeCurvePoint(edgeIndex, t, quad, warps, edgeCache = null) {
+  if (edgeCache) return getCachedEdgeCurvePoint(edgeCache[edgeIndex], t);
+
   const a = quad[edgeIndex];
   const b = quad[(edgeIndex + 1) % 4];
   const normal = edgeInnerNormal(a, b);
@@ -159,13 +162,31 @@ function getEdgeCurvePoint(edgeIndex, t, quad, warps) {
   };
 }
 
+function createEdgeCurveCache(quad, warps) {
+  return quad.map((a, edgeIndex) => {
+    const b = quad[(edgeIndex + 1) % 4];
+    return {
+      a,
+      b,
+      normal: edgeInnerNormal(a, b),
+      stops: createWarpStops(getEdgeWarps(edgeIndex, warps)),
+    };
+  });
+}
+
+function getCachedEdgeCurvePoint(edge, t) {
+  const offset = getEdgeWarpOffsetFromStops(edge.stops, t);
+  return {
+    x: edge.a.x + (edge.b.x - edge.a.x) * t + edge.normal.x * offset,
+    y: edge.a.y + (edge.b.y - edge.a.y) * t + edge.normal.y * offset,
+  };
+}
+
 function getEdgeWarpOffsetAtT(edgeIndex, t, warps) {
-  const handles = getSortedEdgeWarps(edgeIndex, warps);
-  const stops = [
-    { t: 0, offset: 0 },
-    ...handles,
-    { t: 1, offset: 0 },
-  ];
+  return getEdgeWarpOffsetFromStops(createWarpStops(getEdgeWarps(edgeIndex, warps)), t);
+}
+
+function getEdgeWarpOffsetFromStops(stops, t) {
   const clampedT = clamp(t, 0, 1);
 
   for (let i = 0; i < stops.length - 1; i += 1) {
@@ -181,9 +202,19 @@ function getEdgeWarpOffsetAtT(edgeIndex, t, warps) {
   return 0;
 }
 
-function getSortedEdgeWarps(edgeIndex, warps) {
+function createWarpStops(edgeWarps) {
+  const handles = (edgeWarps && edgeWarps.length ? [...edgeWarps] : [{ t: 0.5, offset: 0 }])
+    .sort((a, b) => a.t - b.t);
+  return [
+    { t: 0, offset: 0 },
+    ...handles,
+    { t: 1, offset: 0 },
+  ];
+}
+
+function getEdgeWarps(edgeIndex, warps) {
   const edgeWarps = warps?.[edgeIndex];
-  return (edgeWarps && edgeWarps.length ? [...edgeWarps] : [{ t: 0.5, offset: 0 }]).sort((a, b) => a.t - b.t);
+  return edgeWarps && edgeWarps.length ? edgeWarps : [{ t: 0.5, offset: 0 }];
 }
 
 function edgeInnerNormal(a, b) {

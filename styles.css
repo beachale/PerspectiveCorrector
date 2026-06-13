@@ -396,6 +396,61 @@ select option {
   cursor: grab;
 }
 
+.canvas-control-bar {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.canvas-control-bar .canvas-toggle {
+  position: static;
+}
+
+.canvas-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  background: rgba(53, 53, 53, 0.92);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  user-select: none;
+}
+
+.canvas-control:hover {
+  background: rgba(60, 60, 60, 0.95);
+}
+
+.canvas-control span {
+  color: var(--text);
+}
+
+.canvas-control select {
+  width: 74px;
+  height: 22px;
+  min-height: 22px;
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+.selection-color-control input[type="color"] {
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--line);
+  background: transparent;
+  cursor: pointer;
+}
+
+
 .canvas-toggle {
   position: absolute;
   z-index: 5;

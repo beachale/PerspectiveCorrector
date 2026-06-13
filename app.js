@@ -13,6 +13,8 @@
   const smoothPixelsToggle = document.getElementById('smoothPixelsToggle');
   const downloadBtn = document.getElementById('downloadBtn');
   const copyBtn = document.getElementById('copyBtn');
+  const gridDivisionsSelect = document.getElementById('gridDivisions');
+  const selectionColorInput = document.getElementById('selectionColor');
 
   const outputMode = document.getElementById('outputMode');
   const exportSampling = document.getElementById('exportSampling');
@@ -71,11 +73,16 @@
     activeWorkerJobId: null,
     pendingWorkerSource: null,
     usingDemoDefaults: false,
+    gridDivisions: 4,
+    selectionColor: '#7dd3fc',
+    selectionLineStroke: 'rgba(125, 211, 252, 0.96)',
+    selectionGridStroke: 'rgba(125, 211, 252, 0.34)',
   };
   state.imageCtx = state.imageCanvas.getContext('2d', { willReadFrequently: true });
 
-  const ASSET_VERSION = '20260611-40';
+  const ASSET_VERSION = '20260611-45';
   const DEFAULT_SAMPLING = 'nearest';
+  const DEFAULT_SELECTION_COLOR = '#7dd3fc';
   const DEFAULT_OUTPUT_WIDTH = 1920;
   const DEFAULT_OUTPUT_HEIGHT = 1080;
   const DEMO_IMAGE_NAME = 'demo-photo';
@@ -105,9 +112,13 @@
   const MAX_PIXELS = 50_000_000;
   const DIM_SLIDER_MAX = 0.6;
   const DIM_SLIDER_HIT_RADIUS = 18;
-  const GRID_DIVISIONS = 4;
-  const EDGE_CURVE_DRAW_STEPS = 24;
-  const GRID_LINE_DRAW_STEPS = 14;
+  const DEFAULT_GRID_DIVISIONS = 4;
+  const MIN_GRID_DIVISIONS = 2;
+  const MAX_GRID_DIVISIONS = 32;
+  const MIN_EDGE_CURVE_DRAW_STEPS = 24;
+  const MAX_EDGE_CURVE_DRAW_STEPS = 96;
+  const MIN_GRID_LINE_DRAW_STEPS = 14;
+  const MAX_GRID_LINE_DRAW_STEPS = 72;
   const EDGE_HIT_TEST_STEPS = 18;
   const EDGE_WARP_ADD_STEPS = 48;
   const LIVE_PREVIEW_FAST_MAX_LONG_EDGE = 900;
@@ -333,8 +344,12 @@
   function resizeEditorCanvas() {
     const rect = editorCanvas.parentElement.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
-    editorCanvas.width = Math.max(1, Math.round(rect.width * dpr));
-    editorCanvas.height = Math.max(1, Math.round(rect.height * dpr));
+    const width = Math.max(1, Math.round(rect.width * dpr));
+    const height = Math.max(1, Math.round(rect.height * dpr));
+    if (editorCanvas.width === width && editorCanvas.height === height) return;
+
+    editorCanvas.width = width;
+    editorCanvas.height = height;
     editorCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
     drawEditor();
   }
@@ -442,6 +457,7 @@
     if (!state.quad) return;
 
     const points = state.quad.map(point => imageToScreen(point, t));
+    const edgeCache = createEdgeCurveCache();
 
     if (state.dimAmount > 0.005) {
       // Draw the dimmer only outside the selected quadrilateral.
@@ -451,7 +467,7 @@
       editorCtx.fillStyle = `rgba(0, 0, 0, ${state.dimAmount.toFixed(3)})`;
       editorCtx.beginPath();
       editorCtx.rect(0, 0, width, height);
-      traceSelectionPath(editorCtx, t);
+      traceSelectionPath(editorCtx, t, edgeCache);
       editorCtx.fill('evenodd');
       editorCtx.restore();
     }
@@ -459,20 +475,22 @@
     editorCtx.save();
     editorCtx.globalCompositeOperation = 'source-over';
     editorCtx.lineWidth = 2;
-    editorCtx.strokeStyle = 'rgba(244, 244, 244, 0.96)';
+    editorCtx.lineJoin = 'round';
+    editorCtx.lineCap = 'round';
+    editorCtx.strokeStyle = state.selectionLineStroke;
     editorCtx.beginPath();
-    traceSelectionPath(editorCtx, t);
+    traceSelectionPath(editorCtx, t, edgeCache);
     editorCtx.stroke();
     editorCtx.beginPath();
     editorCtx.restore();
 
-    drawPerspectiveGrid(points, t);
+    drawPerspectiveGrid(points, t, edgeCache);
     drawEdgeHandles(points, t);
     drawCornerHandles(points);
     drawDimSlider(width, height);
   }
 
-  function drawPerspectiveGrid(points, viewTransform) {
+  function drawPerspectiveGrid(points, viewTransform, edgeCache) {
     if (points.length !== 4) return;
 
     let H;
@@ -485,43 +503,49 @@
     const useWarp = hasSideWarp();
 
     editorCtx.save();
-    editorCtx.strokeStyle = 'rgba(244, 244, 244, 0.34)';
+    editorCtx.strokeStyle = state.selectionGridStroke;
     editorCtx.lineWidth = 1;
+    editorCtx.lineJoin = 'round';
+    editorCtx.lineCap = 'round';
+    editorCtx.beginPath();
 
-    for (let i = 1; i < GRID_DIVISIONS; i += 1) {
-      const t = i / GRID_DIVISIONS;
-      drawMappedGridLine({ u: t, v: 0 }, { u: t, v: 1 }, H, viewTransform, useWarp);
-      drawMappedGridLine({ u: 0, v: t }, { u: 1, v: t }, H, viewTransform, useWarp);
+    const divisions = state.gridDivisions;
+    const gridLineSteps = getAdaptiveGridLineDrawSteps(viewTransform, edgeCache);
+    for (let i = 1; i < divisions; i += 1) {
+      const t = i / divisions;
+      traceMappedGridLine({ u: t, v: 0 }, { u: t, v: 1 }, H, viewTransform, useWarp, edgeCache, gridLineSteps);
+      traceMappedGridLine({ u: 0, v: t }, { u: 1, v: t }, H, viewTransform, useWarp, edgeCache, gridLineSteps);
     }
 
+    editorCtx.stroke();
     editorCtx.restore();
   }
 
-  function drawMappedGridLine(from, to, H, viewTransform, useWarp) {
-    editorCtx.beginPath();
-    for (let i = 0; i <= GRID_LINE_DRAW_STEPS; i += 1) {
-      const t = i / GRID_LINE_DRAW_STEPS;
+  function traceMappedGridLine(from, to, H, viewTransform, useWarp, edgeCache, steps = MIN_GRID_LINE_DRAW_STEPS) {
+    for (let i = 0; i <= steps; i += 1) {
+      const t = i / steps;
       const imagePoint = mapUnitToImage(
         from.u + (to.u - from.u) * t,
         from.v + (to.v - from.v) * t,
         H,
         useWarp,
+        edgeCache,
       );
       const screenPoint = imageToScreen(imagePoint, viewTransform);
       if (i === 0) editorCtx.moveTo(screenPoint.x, screenPoint.y);
       else editorCtx.lineTo(screenPoint.x, screenPoint.y);
     }
-    editorCtx.stroke();
   }
 
-  function traceSelectionPath(ctx, viewTransform = getViewTransform()) {
+  function traceSelectionPath(ctx, viewTransform = getViewTransform(), edgeCache = null) {
     if (!state.quad) return;
 
     let hasStarted = false;
     for (let edgeIndex = 0; edgeIndex < 4; edgeIndex += 1) {
-      for (let step = 0; step <= EDGE_CURVE_DRAW_STEPS; step += 1) {
+      const steps = getAdaptiveEdgeCurveDrawSteps(edgeIndex, viewTransform, edgeCache);
+      for (let step = 0; step <= steps; step += 1) {
         if (edgeIndex > 0 && step === 0) continue;
-        const point = imageToScreen(getEdgeCurvePoint(edgeIndex, step / EDGE_CURVE_DRAW_STEPS), viewTransform);
+        const point = imageToScreen(getEdgeCurvePoint(edgeIndex, step / steps, state.quad, state.edgeWarps, edgeCache), viewTransform);
         if (!hasStarted) {
           ctx.moveTo(point.x, point.y);
           hasStarted = true;
@@ -534,7 +558,30 @@
     ctx.closePath();
   }
 
-  function getEdgeCurvePoint(edgeIndex, t, quad = state.quad, warps = state.edgeWarps) {
+
+  function getAdaptiveEdgeCurveDrawSteps(edgeIndex, viewTransform = getViewTransform(), edgeCache = null) {
+    const a = imageToScreen(state.quad[edgeIndex], viewTransform);
+    const b = imageToScreen(state.quad[(edgeIndex + 1) % 4], viewTransform);
+    const edgeLength = Math.hypot(b.x - a.x, b.y - a.y);
+    const warpCount = getEdgeWarps(edgeIndex).length;
+    const suggested = Math.ceil(edgeLength / 14) + Math.max(0, warpCount - 1) * 8;
+    return clamp(Math.max(MIN_EDGE_CURVE_DRAW_STEPS, suggested), MIN_EDGE_CURVE_DRAW_STEPS, MAX_EDGE_CURVE_DRAW_STEPS);
+  }
+
+  function getAdaptiveGridLineDrawSteps(viewTransform = getViewTransform(), edgeCache = null) {
+    let longestEdgeLength = 0;
+    for (let edgeIndex = 0; edgeIndex < 4; edgeIndex += 1) {
+      const a = imageToScreen(state.quad[edgeIndex], viewTransform);
+      const b = imageToScreen(state.quad[(edgeIndex + 1) % 4], viewTransform);
+      longestEdgeLength = Math.max(longestEdgeLength, Math.hypot(b.x - a.x, b.y - a.y));
+    }
+    const suggested = Math.ceil(longestEdgeLength / 18) + Math.max(0, state.gridDivisions - DEFAULT_GRID_DIVISIONS);
+    return clamp(Math.max(MIN_GRID_LINE_DRAW_STEPS, suggested), MIN_GRID_LINE_DRAW_STEPS, MAX_GRID_LINE_DRAW_STEPS);
+  }
+
+  function getEdgeCurvePoint(edgeIndex, t, quad = state.quad, warps = state.edgeWarps, edgeCache = null) {
+    if (edgeCache) return getCachedEdgeCurvePoint(edgeCache[edgeIndex], t);
+
     const a = quad[edgeIndex];
     const b = quad[(edgeIndex + 1) % 4];
     const normal = edgeInnerNormal(a, b);
@@ -546,13 +593,31 @@
     };
   }
 
+  function createEdgeCurveCache(quad = state.quad, warps = state.edgeWarps) {
+    return quad.map((a, edgeIndex) => {
+      const b = quad[(edgeIndex + 1) % 4];
+      return {
+        a,
+        b,
+        normal: edgeInnerNormal(a, b),
+        stops: createWarpStops(getEdgeWarps(edgeIndex, warps)),
+      };
+    });
+  }
+
+  function getCachedEdgeCurvePoint(edge, t) {
+    const offset = getEdgeWarpOffsetFromStops(edge.stops, t);
+    return {
+      x: edge.a.x + (edge.b.x - edge.a.x) * t + edge.normal.x * offset,
+      y: edge.a.y + (edge.b.y - edge.a.y) * t + edge.normal.y * offset,
+    };
+  }
+
   function getEdgeWarpOffsetAtT(edgeIndex, t, warps = state.edgeWarps) {
-    const handles = getSortedEdgeWarps(edgeIndex, warps);
-    const stops = [
-      { t: 0, offset: 0 },
-      ...handles,
-      { t: 1, offset: 0 },
-    ];
+    return getEdgeWarpOffsetFromStops(createWarpStops(getEdgeWarps(edgeIndex, warps)), t);
+  }
+
+  function getEdgeWarpOffsetFromStops(stops, t) {
     const clampedT = clamp(t, 0, 1);
 
     for (let i = 0; i < stops.length - 1; i += 1) {
@@ -650,8 +715,18 @@
     return edgeWarps && edgeWarps.length ? edgeWarps : [{ t: 0.5, offset: 0 }];
   }
 
+  function createWarpStops(edgeWarps) {
+    const handles = (edgeWarps && edgeWarps.length ? [...edgeWarps] : [{ t: 0.5, offset: 0 }])
+      .sort((a, b) => a.t - b.t);
+    return [
+      { t: 0, offset: 0 },
+      ...handles,
+      { t: 1, offset: 0 },
+    ];
+  }
+
   function getSortedEdgeWarps(edgeIndex, warps = state.edgeWarps) {
-    return [...getEdgeWarps(edgeIndex, warps)].sort((a, b) => a.t - b.t);
+    return createWarpStops(getEdgeWarps(edgeIndex, warps)).slice(1, -1);
   }
 
   function getEdgeWarpHandlePoint(edgeIndex, warpIndex = 0, quad = state.quad, warps = state.edgeWarps) {
@@ -754,10 +829,10 @@
     return warps.some(edge => edge.some(warp => Math.abs(warp.offset) > 0.01));
   }
 
-  function mapUnitToImage(u, v, H = getUnitToQuadHomography(), useWarp = hasSideWarp()) {
+  function mapUnitToImage(u, v, H = getUnitToQuadHomography(), useWarp = hasSideWarp(), edgeCache = null) {
     const base = applyHomography(H, u, v);
     if (!useWarp) return base;
-    const displacement = getWarpDisplacement(u, v);
+    const displacement = getWarpDisplacement(u, v, state.quad, state.edgeWarps, edgeCache);
     return { x: base.x + displacement.x, y: base.y + displacement.y };
   }
 
@@ -770,17 +845,17 @@
     ], state.quad);
   }
 
-  function getWarpDisplacement(u, v, quad = state.quad, warps = state.edgeWarps) {
-    const warped = coonsPatchPoint(u, v, quad, warps);
+  function getWarpDisplacement(u, v, quad = state.quad, warps = state.edgeWarps, edgeCache = null) {
+    const warped = coonsPatchPoint(u, v, quad, warps, edgeCache);
     const straight = bilinearPatchPoint(u, v, quad);
     return { x: warped.x - straight.x, y: warped.y - straight.y };
   }
 
-  function coonsPatchPoint(u, v, quad = state.quad, warps = state.edgeWarps) {
-    const top = getEdgeCurvePoint(0, u, quad, warps);
-    const right = getEdgeCurvePoint(1, v, quad, warps);
-    const bottom = getEdgeCurvePoint(2, 1 - u, quad, warps);
-    const left = getEdgeCurvePoint(3, 1 - v, quad, warps);
+  function coonsPatchPoint(u, v, quad = state.quad, warps = state.edgeWarps, edgeCache = null) {
+    const top = getEdgeCurvePoint(0, u, quad, warps, edgeCache);
+    const right = getEdgeCurvePoint(1, v, quad, warps, edgeCache);
+    const bottom = getEdgeCurvePoint(2, 1 - u, quad, warps, edgeCache);
+    const left = getEdgeCurvePoint(3, 1 - v, quad, warps, edgeCache);
     const bilinear = bilinearPatchPoint(u, v, quad);
 
     return {
@@ -1346,6 +1421,11 @@
 
   outputMode.addEventListener('change', syncOutputModeVisibility);
   if (exportSampling) exportSampling.addEventListener('change', refreshOutputSettings);
+  if (gridDivisionsSelect) gridDivisionsSelect.addEventListener('change', updateGridDivisions);
+  if (selectionColorInput) {
+    selectionColorInput.addEventListener('input', updateSelectionColor);
+    selectionColorInput.addEventListener('change', updateSelectionColor);
+  }
 
   rectifyBtn.addEventListener('click', () => renderPerspective().catch(error => {
     console.error(error);
@@ -1405,6 +1485,36 @@
       setStatus('Could not copy to the clipboard. Your browser may require permission or HTTPS; use Download PNG instead.', 'danger');
     }
   });
+
+  function normalizeGridDivisions(value) {
+    const divisions = Number.parseInt(value, 10);
+    if (!Number.isFinite(divisions)) return DEFAULT_GRID_DIVISIONS;
+    return clamp(divisions, MIN_GRID_DIVISIONS, MAX_GRID_DIVISIONS);
+  }
+
+  function updateGridDivisions() {
+    state.gridDivisions = normalizeGridDivisions(gridDivisionsSelect?.value);
+    drawEditor();
+  }
+
+  function normalizeSelectionColor(value) {
+    return /^#[0-9a-f]{6}$/i.test(value || '') ? value : DEFAULT_SELECTION_COLOR;
+  }
+
+  function updateSelectionColor() {
+    state.selectionColor = normalizeSelectionColor(selectionColorInput?.value);
+    state.selectionLineStroke = selectionColorWithAlpha(0.96);
+    state.selectionGridStroke = selectionColorWithAlpha(0.34);
+    drawEditor();
+  }
+
+  function selectionColorWithAlpha(alpha) {
+    const hex = normalizeSelectionColor(state.selectionColor).slice(1);
+    const red = Number.parseInt(hex.slice(0, 2), 16);
+    const green = Number.parseInt(hex.slice(2, 4), 16);
+    const blue = Number.parseInt(hex.slice(4, 6), 16);
+    return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+  }
 
   function getSamplePixelFunction(sampling) {
     return sampling === 'nearest' ? sampleNearest : sampleBilinear;
@@ -1659,6 +1769,7 @@
     ];
     const H = solveHomography(dstRect, quad);
     const useWarp = hasSideWarp(warps);
+    const edgeCache = useWarp ? createEdgeCurveCache(quad, warps) : null;
 
     return (x, y) => {
       const base = applyHomography(H, x, y);
@@ -1666,7 +1777,7 @@
 
       const u = outW > 0 ? x / outW : 0;
       const v = outH > 0 ? y / outH : 0;
-      const displacement = getWarpDisplacement(u, v, quad, warps);
+      const displacement = getWarpDisplacement(u, v, quad, warps, edgeCache);
       return {
         x: base.x + displacement.x,
         y: base.y + displacement.y,
@@ -2095,5 +2206,7 @@
 
   new ResizeObserver(resizeEditorCanvas).observe(editorCanvas.parentElement);
   if (previewStage) new ResizeObserver(applyOutputView).observe(previewStage);
+  updateGridDivisions();
+  updateSelectionColor();
   updateOutputSummary();
 })();
